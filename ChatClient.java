@@ -4,7 +4,7 @@ import java.net.*;
 public class ChatClient {
     public static void main(String[] args) {
         String host = (args.length >= 1) ? args[0] : "127.0.0.1";
-        int port = (args.length >= 2) ? Integer.parseInt(args[1]) : 9999;
+        int port = (args.length >= 2) ? Integer.parseInt(args[1]) : 12345;
 
         try (Socket socket = new Socket(host, port);
              BufferedReader serverIn = new BufferedReader(new InputStreamReader(socket.getInputStream()));

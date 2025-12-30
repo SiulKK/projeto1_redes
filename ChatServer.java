@@ -1,58 +1,60 @@
-// ChatServer.java
 import java.io.*;
-import java.net.*;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Set;
 import java.util.concurrent.*;
-import java.util.*;
 
 public class ChatServer {
 
-    private static final int PORT = 9999;
-    private static final int MAX_CLIENTS = 100;
+    private static final int PORT = 12345;
 
-    // nickname -> sessão do cliente
-    private final ConcurrentMap<String, ClientSession> clients = new ConcurrentHashMap<>();
-    private final ExecutorService pool = Executors.newFixedThreadPool(MAX_CLIENTS);
+    // Conjunto thread-safe de clientes
+    private static Set<ClientHandler> clients =
+            ConcurrentHashMap.newKeySet();
+
+    private static ExecutorService pool =
+            Executors.newFixedThreadPool(20);
 
     public static void main(String[] args) {
-        new ChatServer().start();
-    }
+        System.out.println("Servidor iniciado na porta " + PORT);
 
-    public void start() {
-        try (ServerSocket serverSocket =
-                     new ServerSocket(PORT, 50, InetAddress.getByName("0.0.0.0"))) {
-
-            System.out.println("ChatServer iniciado na porta " + PORT);
-
+        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
             while (true) {
                 Socket socket = serverSocket.accept();
-                pool.execute(new ClientHandler(socket));
+                ClientHandler client = new ClientHandler(socket);
+                clients.add(client);
+                pool.execute(client);
             }
         } catch (IOException e) {
-            System.err.println("Erro no servidor: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
-    // ===================== BROADCAST =====================
-    private void broadcast(String message) {
-        clients.values().forEach(session -> session.enqueue(message));
-    }
-
-    private void broadcast(String from, String message) {
-        broadcast(from + ": " + message);
-    }
-
-    private void sendPrivate(String from, String to, String message) {
-        ClientSession target = clients.get(to);
-        if (target != null) {
-            target.enqueue("(PM) " + from + ": " + message);
+    // Broadcast para todos
+    public static void broadcast(String message) {
+        for (ClientHandler c : clients) {
+            c.send(message);
         }
     }
 
-    // ===================== CLIENT HANDLER =====================
-    private class ClientHandler implements Runnable {
-        private final Socket socket;
-        private String nickname;
-        private ClientSession session;
+    // Remove cliente
+    public static void remove(ClientHandler c) {
+        clients.remove(c);
+    }
+
+    // ================== CLASSE INTERNA ==================
+    static class ClientHandler implements Runnable {
+
+        private Socket socket;
+        private BufferedReader in;
+        private PrintWriter out;
+        private String nick = "Anônimo";
+
+        // Fila por cliente (evita bloqueio)
+        private BlockingQueue<String> queue =
+                new LinkedBlockingQueue<>();
 
         ClientHandler(Socket socket) {
             this.socket = socket;
@@ -60,129 +62,120 @@ public class ChatServer {
 
         @Override
         public void run() {
-            String remote = socket.getRemoteSocketAddress().toString();
-            System.out.println("Conectado: " + remote);
+            try {
+                in = new BufferedReader(
+                        new InputStreamReader(socket.getInputStream()));
+                out = new PrintWriter(socket.getOutputStream(), true);
 
-            try (BufferedReader in =
-                         new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                // Thread exclusiva de envio
+                new Thread(this::sendLoop).start();
 
-                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-                session = new ClientSession(out);
-                session.startWriter();
+                send(ts() + " Servidor: Bem-vindo ao chat!");
+                sendHelp();
+                broadcast(ts() + " Servidor: Um usuário entrou no chat");
 
-                session.enqueue("Bem-vindo ao Chat!");
-                session.enqueue("Use /nick <nome>, /pm <nick> <msg>, /list, /quit");
-
-                String line;
-                while ((line = in.readLine()) != null) {
-                    handleCommand(line.trim());
+                String msg;
+                while ((msg = in.readLine()) != null) {
+                    handleMessage(msg);
                 }
 
             } catch (IOException e) {
-                System.err.println("Erro com cliente " + remote);
+                // cliente caiu
             } finally {
                 disconnect();
             }
         }
 
-        private void handleCommand(String line) {
-            if (line.isEmpty()) return;
+        // Processa mensagens e comandos
+        private void handleMessage(String msg) {
 
-            if (line.startsWith("/nick ")) {
-                String desired = line.substring(6).trim();
-                if (desired.isEmpty()) {
-                    session.enqueue("Uso: /nick <nome>");
+            if (msg.startsWith("/help")) {
+                sendHelp();
+                return;
+            }
+
+            if (msg.startsWith("/nick")) {
+                String[] p = msg.split(" ", 2);
+                if (p.length < 2) {
+                    send(ts() + " Servidor: uso correto /nick <nome>");
+                    return;
+                }
+                nick = p[1];
+                send(ts() + " Servidor: nick alterado para " + nick);
+                return;
+            }
+
+            if (msg.startsWith("/list")) {
+                send(ts() + " Servidor: usuários conectados:");
+                for (ClientHandler c : clients) {
+                    send("- " + c.nick);
+                }
+                return;
+            }
+
+            if (msg.startsWith("/pm")) {
+                String[] p = msg.split(" ", 3);
+                if (p.length < 3) {
+                    send(ts() + " Servidor: uso correto /pm <nick> <msg>");
                     return;
                 }
 
-                synchronized (clients) {
-                    if (clients.containsKey(desired)) {
-                        session.enqueue("Nick já em uso.");
-                    } else {
-                        if (nickname != null) {
-                            clients.remove(nickname);
-                        }
-                        nickname = desired;
-                        clients.put(nickname, session);
-                        session.enqueue("Nick definido: " + nickname);
-                        broadcast(nickname + " entrou no chat.");
+                for (ClientHandler c : clients) {
+                    if (c.nick.equals(p[1])) {
+                        c.send(ts() + " (PM) " + nick + ": " + p[2]);
+                        return;
                     }
                 }
+                send(ts() + " Servidor: usuário não encontrado");
+                return;
+            }
 
-            } else if (line.equalsIgnoreCase("/list")) {
-                session.enqueue("Usuários conectados:");
-                clients.keySet().forEach(n -> session.enqueue("- " + n));
-                session.enqueue("END");
-
-            } else if (line.startsWith("/pm ")) {
-                String[] parts = line.split(" ", 3);
-                if (parts.length < 3) {
-                    session.enqueue("Uso: /pm <nick> <mensagem>");
-                } else if (nickname == null) {
-                    session.enqueue("Defina um nick antes.");
-                } else if (!clients.containsKey(parts[1])) {
-                    session.enqueue("Usuário não encontrado.");
-                } else {
-                    sendPrivate(nickname, parts[1], parts[2]);
-                }
-
-            } else if (line.equalsIgnoreCase("/quit")) {
-                session.enqueue("Saindo...");
+            if (msg.startsWith("/quit")) {
                 disconnect();
-
-            } else {
-                if (nickname == null) {
-                    session.enqueue("Defina um nick antes.");
-                } else {
-                    broadcast(nickname, line);
-                }
+                return;
             }
+
+            // Mensagem pública (broadcast)
+            broadcast(ts() + " " + nick + ": " + msg);
         }
 
-        private void disconnect() {
-            if (nickname != null) {
-                clients.remove(nickname);
-                broadcast(nickname + " saiu do chat.");
-            }
-            if (session != null) session.stop();
-            try { socket.close(); } catch (IOException ignored) {}
-        }
-    }
-
-    // ===================== CLIENT SESSION =====================
-    private static class ClientSession {
-        private final PrintWriter out;
-        private final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
-        private volatile boolean running = true;
-
-        ClientSession(PrintWriter out) {
-            this.out = out;
-        }
-
-        void enqueue(String msg) {
+        // Loop de envio (consumidor)
+        private void sendLoop() {
             try {
-                queue.put(msg);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-
-        void startWriter() {
-            Thread writer = new Thread(() -> {
-                try {
-                    while (running) {
-                        String msg = queue.take();
-                        out.println(msg);
-                    }
-                } catch (InterruptedException ignored) {
+                while (true) {
+                    out.println(queue.take());
                 }
-            });
-            writer.setDaemon(true);
-            writer.start();
+            } catch (InterruptedException ignored) {}
         }
 
-        void stop() {
-            running = false;
+        // Enfileira mensagem
+        void send(String msg) {
+            queue.offer(msg);
+        }
+
+        // Timestamp
+        private String ts() {
+            return "[" + LocalTime.now()
+                    .format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "]";
+        }
+
+        // /help
+        private void sendHelp() {
+            send("📌 Comandos disponíveis:");
+            send("/nick <nome>        - Define seu nome");
+            send("/list               - Lista usuários");
+            send("/pm <nick> <msg>    - Mensagem privada");
+            send("/help               - Mostra ajuda");
+            send("/quit               - Sai do chat");
+        }
+
+        // Desconexão
+        private void disconnect() {
+            try {
+                clients.remove(this);
+                broadcast(ts() + " Servidor: " + nick + " saiu do chat");
+                socket.close();
+            } catch (IOException ignored) {}
         }
     }
 }
