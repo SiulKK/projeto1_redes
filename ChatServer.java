@@ -8,12 +8,14 @@ import java.util.concurrent.*;
 
 public class ChatServer {
 
+    // Porta onde o servidor ficará escutando
     private static final int PORT = 12345;
 
-    // Conjunto thread-safe de clientes
+    // Conjunto thread-safe para armazenar os clientes conectados
     private static Set<ClientHandler> clients =
             ConcurrentHashMap.newKeySet();
 
+    // Pool de threads para atender vários clientes ao mesmo tempo
     private static ExecutorService pool =
             Executors.newFixedThreadPool(20);
 
@@ -21,30 +23,32 @@ public class ChatServer {
         System.out.println("Servidor iniciado na porta " + PORT);
 
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+
+            // Aceita conexões continuamente
             while (true) {
                 Socket socket = serverSocket.accept();
                 ClientHandler client = new ClientHandler(socket);
                 clients.add(client);
                 pool.execute(client);
             }
+
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    // Broadcast para todos
+    // Envia mensagem para todos os clientes conectados
     public static void broadcast(String message) {
         for (ClientHandler c : clients) {
             c.send(message);
         }
     }
 
-    // Remove cliente
+    // Remove cliente do conjunto
     public static void remove(ClientHandler c) {
         clients.remove(c);
     }
 
-    // ================== CLASSE INTERNA ==================
     static class ClientHandler implements Runnable {
 
         private Socket socket;
@@ -52,7 +56,7 @@ public class ChatServer {
         private PrintWriter out;
         private String nick = "Anônimo";
 
-        // Fila por cliente (evita bloqueio)
+        // Fila de mensagens para evitar bloqueios no envio
         private BlockingQueue<String> queue =
                 new LinkedBlockingQueue<>();
 
@@ -63,11 +67,12 @@ public class ChatServer {
         @Override
         public void run() {
             try {
+                // Streams de entrada e saída
                 in = new BufferedReader(
                         new InputStreamReader(socket.getInputStream()));
                 out = new PrintWriter(socket.getOutputStream(), true);
 
-                // Thread exclusiva de envio
+                // Thread separada apenas para envio de mensagens
                 new Thread(this::sendLoop).start();
 
                 send(ts() + " Servidor: Bem-vindo ao chat!");
@@ -80,13 +85,13 @@ public class ChatServer {
                 }
 
             } catch (IOException e) {
-                // cliente caiu
+                // conexão encerrada
             } finally {
                 disconnect();
             }
         }
 
-        // Processa mensagens e comandos
+        // Trata comandos e mensagens do cliente
         private void handleMessage(String msg) {
 
             if (msg.startsWith("/help")) {
@@ -135,11 +140,11 @@ public class ChatServer {
                 return;
             }
 
-            // Mensagem pública (broadcast)
+            // Mensagem enviada para todos
             broadcast(ts() + " " + nick + ": " + msg);
         }
 
-        // Loop de envio (consumidor)
+        // Loop responsável apenas por enviar mensagens da fila
         private void sendLoop() {
             try {
                 while (true) {
@@ -148,28 +153,28 @@ public class ChatServer {
             } catch (InterruptedException ignored) {}
         }
 
-        // Enfileira mensagem
+        // Adiciona mensagem na fila de envio
         void send(String msg) {
             queue.offer(msg);
         }
 
-        // Timestamp
+        // Gera timestamp no formato HH:mm:ss
         private String ts() {
             return "[" + LocalTime.now()
                     .format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "]";
         }
 
-        // /help
+        // Envia lista de comandos disponíveis
         private void sendHelp() {
-            send("📌 Comandos disponíveis:");
-            send("/nick <nome>        - Define seu nome");
-            send("/list               - Lista usuários");
-            send("/pm <nick> <msg>    - Mensagem privada");
-            send("/help               - Mostra ajuda");
-            send("/quit               - Sai do chat");
+            send("Comandos disponíveis:");
+            send("/nick <nome> - Define o nome");
+            send("/list        - Lista usuários");
+            send("/pm <nick> <msg> - Mensagem privada");
+            send("/help        - Ajuda");
+            send("/quit        - Sair");
         }
 
-        // Desconexão
+        // Finaliza conexão do cliente
         private void disconnect() {
             try {
                 clients.remove(this);
