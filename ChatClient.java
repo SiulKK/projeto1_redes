@@ -45,7 +45,7 @@ public class ChatClient {
             // Cria uma thread responsável por receber mensagens do servidor
             Thread reader = new Thread(() -> {
                 try {
-                    String s;e
+                    String s;
                     while ((s = serverIn.readLine()) != null) {
                         System.out.println(s);
                     }
